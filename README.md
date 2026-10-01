@@ -24,7 +24,7 @@ Set the replacement key only as the server environment variable `GEMINI_API_KEY`
 Requirements: Node.js 20.9 or newer and npm.
 
 1. In Google AI Studio, revoke the exposed screenshot key and create a fresh Gemini API key with Live API access.
-2. Create an ignored `.env.local` file in the project root and add the new key as `GEMINI_API_KEY`.
+2. Copy `.example.env` to `.env.local` (`Copy-Item .example.env .env.local` in PowerShell) and place the new key in `GEMINI_API_KEY` there. `.example.env` is a template only and is not auto-loaded.
 3. Install and start the app:
 
    ```bash
@@ -57,7 +57,7 @@ The first visit pre-warms a short-lived session token and the audio worklet. The
 Deploy as a **Node Web Service**, not a static site: the app needs server-side routes to mint constrained tokens and run local RAG.
 
 1. **Rotate the exposed key first.** In Google AI Studio, revoke the credential shown in `key.png` and create a replacement key. Do not paste the replacement into source files or commit it.
-2. Push your clean, locally authored feature branch to **your own repository**. In Render, choose **New → Web Service** and connect that repository and branch.
+2. Push your clean, locally authored feature branch to **your own repository**. In Render, choose **New → Web Service** and connect that repository and branch. The selected branch must contain `@google/genai` in `package.json`; if Render logs show an older `main` commit, change the service's deploy branch before retrying.
 3. Set the service options:
    - **Runtime:** Node
    - **Build command:** `npm ci && npm run build`
