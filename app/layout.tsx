@@ -3,9 +3,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Raqmiva — Bilingual AI Receptionist Demo",
-  description:
-    "Try Raqmiva, a low-latency AI receptionist demo that automatically follows Emirati Arabic and English.",
+  title: "Raqmiva Demo",
+  description: "Raqmiva voice demo.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

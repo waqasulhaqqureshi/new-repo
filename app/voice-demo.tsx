@@ -16,6 +16,23 @@ type SessionToken = {
 
 type TokenResponse = Partial<SessionToken> & { error?: string };
 
+const IDLE_NUDGE_DELAY_MS = 12_000;
+const USER_VOICE_RMS_THRESHOLD = 0.018;
+const IDLE_NUDGE_SENTINEL = "__RAQMIVA_SILENCE_CHECK__";
+
+function hasVoiceActivity(buffer: ArrayBuffer) {
+  const samples = new Int16Array(buffer);
+  if (samples.length === 0) return false;
+
+  let squaredTotal = 0;
+  for (const rawSample of samples) {
+    const sample = rawSample / 32768;
+    squaredTotal += sample * sample;
+  }
+
+  return Math.sqrt(squaredTotal / samples.length) >= USER_VOICE_RMS_THRESHOLD;
+}
+
 function encodeAudioChunk(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -73,6 +90,79 @@ export default function VoiceDemo() {
   const setupCompleteRef = useRef(false);
   const greetingSentRef = useRef(false);
   const startGreetingRef = useRef<(() => void) | null>(null);
+  const idleNudgeTimerRef = useRef<number | null>(null);
+  const idleNudgeSentRef = useRef(false);
+  const modelTurnCompleteRef = useRef(false);
+  const knowledgeRequestInFlightRef = useRef(false);
+
+  const clearIdleNudgeTimer = useCallback(() => {
+    if (idleNudgeTimerRef.current !== null) {
+      window.clearTimeout(idleNudgeTimerRef.current);
+      idleNudgeTimerRef.current = null;
+    }
+  }, []);
+
+  const noteCallerSpeech = useCallback(() => {
+    if (!callActiveRef.current) return;
+
+    idleNudgeSentRef.current = false;
+    modelTurnCompleteRef.current = false;
+    clearIdleNudgeTimer();
+  }, [clearIdleNudgeTimer]);
+
+  const scheduleIdleNudge = useCallback(() => {
+    clearIdleNudgeTimer();
+    if (!callActiveRef.current || !sessionRef.current || idleNudgeSentRef.current) {
+      return;
+    }
+
+    const checkSilence = () => {
+      idleNudgeTimerRef.current = null;
+      if (
+        !callActiveRef.current ||
+        !sessionRef.current ||
+        idleNudgeSentRef.current
+      ) {
+        return;
+      }
+
+      if (
+        playbackSourcesRef.current.size > 0 ||
+        knowledgeRequestInFlightRef.current ||
+        !modelTurnCompleteRef.current
+      ) {
+        idleNudgeTimerRef.current = window.setTimeout(checkSilence, 1_000);
+        return;
+      }
+
+      const session = sessionRef.current;
+      if (!session) return;
+
+      idleNudgeSentRef.current = true;
+      modelTurnCompleteRef.current = false;
+      setActivity("thinking");
+      try {
+        session.sendClientContent({
+          turns: [
+            {
+              role: "user",
+              parts: [{ text: IDLE_NUDGE_SENTINEL }],
+            },
+          ],
+          turnComplete: true,
+        });
+      } catch {
+        idleNudgeSentRef.current = false;
+        modelTurnCompleteRef.current = true;
+        setActivity("listening");
+      }
+    };
+
+    idleNudgeTimerRef.current = window.setTimeout(
+      checkSilence,
+      IDLE_NUDGE_DELAY_MS,
+    );
+  }, [clearIdleNudgeTimer]);
 
   const prepareSessionToken = useCallback((): Promise<SessionToken> => {
     const cached = tokenRef.current;
@@ -123,7 +213,6 @@ export default function VoiceDemo() {
   const clearPlayback = useCallback(() => {
     const context = audioContextRef.current;
     for (const source of playbackSourcesRef.current) {
-      source.onended = null;
       try {
         source.stop();
         source.disconnect();
@@ -138,6 +227,10 @@ export default function VoiceDemo() {
   const cleanupResources = useCallback(() => {
     callActiveRef.current = false;
     startGreetingRef.current = null;
+    clearIdleNudgeTimer();
+    idleNudgeSentRef.current = false;
+    modelTurnCompleteRef.current = false;
+    knowledgeRequestInFlightRef.current = false;
 
     const session = sessionRef.current;
     sessionRef.current = null;
@@ -177,7 +270,7 @@ export default function VoiceDemo() {
     if (context && context.state !== "closed") {
       void context.close().catch(() => undefined);
     }
-  }, [clearPlayback]);
+  }, [clearIdleNudgeTimer, clearPlayback]);
 
   const finishConversation = useCallback(() => {
     stopRequestedRef.current = true;
@@ -223,6 +316,7 @@ export default function VoiceDemo() {
         source.disconnect();
         if (playbackSourcesRef.current.size === 0 && callActiveRef.current) {
           setActivity("listening");
+          if (modelTurnCompleteRef.current) scheduleIdleNudge();
         }
       };
       source.start(startAt);
@@ -230,12 +324,15 @@ export default function VoiceDemo() {
     } catch {
       setNotice("Audio playback was interrupted. You can keep speaking or restart the demo.");
     }
-  }, []);
+  }, [scheduleIdleNudge]);
 
   const answerKnowledgeCalls = useCallback(async (calls: FunctionCall[]) => {
     const session = sessionRef.current;
     if (!session || !callActiveRef.current) return;
 
+    clearIdleNudgeTimer();
+    knowledgeRequestInFlightRef.current = true;
+    modelTurnCompleteRef.current = false;
     setActivity("thinking");
     const responses = await Promise.all(
       calls.map(async (call) => {
@@ -282,13 +379,22 @@ export default function VoiceDemo() {
       }),
     );
 
-    if (sessionRef.current !== session || !callActiveRef.current) return;
+    if (sessionRef.current !== session || !callActiveRef.current) {
+      if (sessionRef.current === session) {
+        knowledgeRequestInFlightRef.current = false;
+      }
+      return;
+    }
+
+    knowledgeRequestInFlightRef.current = false;
     try {
       session.sendToolResponse({ functionResponses: responses });
     } catch {
+      modelTurnCompleteRef.current = true;
       setActivity("listening");
+      scheduleIdleNudge();
     }
-  }, []);
+  }, [clearIdleNudgeTimer, scheduleIdleNudge]);
 
   const handleLiveMessage = useCallback(
     (message: LiveServerMessage) => {
@@ -299,11 +405,17 @@ export default function VoiceDemo() {
 
       const content = message.serverContent;
       if (content?.interrupted) {
+        clearIdleNudgeTimer();
+        modelTurnCompleteRef.current = false;
         clearPlayback();
         setActivity("listening");
       }
 
       const parts = content?.modelTurn?.parts ?? [];
+      if (parts.length > 0) {
+        clearIdleNudgeTimer();
+        modelTurnCompleteRef.current = false;
+      }
       for (const part of parts) {
         const inlineData = part.inlineData;
         if (
@@ -314,8 +426,15 @@ export default function VoiceDemo() {
         }
       }
 
-      if (content?.turnComplete && playbackSourcesRef.current.size === 0) {
-        setActivity("listening");
+      if (content?.turnComplete) {
+        modelTurnCompleteRef.current = true;
+        if (
+          playbackSourcesRef.current.size === 0 &&
+          !knowledgeRequestInFlightRef.current
+        ) {
+          setActivity("listening");
+        }
+        scheduleIdleNudge();
       }
 
       const functionCalls = message.toolCall?.functionCalls;
@@ -323,7 +442,13 @@ export default function VoiceDemo() {
         void answerKnowledgeCalls(functionCalls);
       }
     },
-    [answerKnowledgeCalls, clearPlayback, playAudioChunk],
+    [
+      answerKnowledgeCalls,
+      clearIdleNudgeTimer,
+      clearPlayback,
+      playAudioChunk,
+      scheduleIdleNudge,
+    ],
   );
 
   const beginConversation = useCallback(async () => {
@@ -350,6 +475,10 @@ export default function VoiceDemo() {
     stopRequestedRef.current = false;
     setupCompleteRef.current = false;
     greetingSentRef.current = false;
+    clearIdleNudgeTimer();
+    idleNudgeSentRef.current = false;
+    modelTurnCompleteRef.current = false;
+    knowledgeRequestInFlightRef.current = false;
     callActiveRef.current = true;
     setPhase("connecting");
     setActivity("listening");
@@ -411,6 +540,7 @@ export default function VoiceDemo() {
         const session = sessionRef.current;
         if (!session || !callActiveRef.current) return;
 
+        if (hasVoiceActivity(event.data)) noteCallerSpeech();
         try {
           session.sendRealtimeInput({
             audio: {
@@ -506,7 +636,15 @@ export default function VoiceDemo() {
       setActivity("listening");
       setNotice(microphoneErrorMessage(error));
     }
-  }, [cleanupResources, finishConversation, handleLiveMessage, phase, prepareSessionToken]);
+  }, [
+    cleanupResources,
+    clearIdleNudgeTimer,
+    finishConversation,
+    handleLiveMessage,
+    noteCallerSpeech,
+    phase,
+    prepareSessionToken,
+  ]);
 
   const endConversation = useCallback(() => {
     if (phase === "connecting") {
@@ -569,8 +707,8 @@ export default function VoiceDemo() {
 
   return (
     <main className="demo-shell">
-      <section className="demo-content" aria-labelledby="demo-title">
-        <div className="brand-mark" aria-label="Raqmiva">
+      <section className="demo-content" aria-label="Raqmiva voice demo">
+        <div className="brand-mark" role="img" aria-label="Raqmiva demo">
           <svg
             className="brand-icon"
             viewBox="0 0 32 32"
@@ -592,18 +730,9 @@ export default function VoiceDemo() {
             />
             <circle cx="16" cy="26" r="2" fill="currentColor" />
           </svg>
-          <span>raqmiva</span>
+          <span className="brand-name">raqmiva</span>
+          <span className="brand-demo">demo</span>
         </div>
-
-        <p className="demo-eyebrow">BILINGUAL AI RECEPTIONIST · LIVE DEMO</p>
-        <h1 id="demo-title">
-          A better first hello.
-          <span>In your language.</span>
-        </h1>
-        <p className="demo-description">
-          Meet Raqmiva, the UAE voice receptionist. Speak naturally in Emirati
-          Arabic or English—we’ll follow your lead.
-        </p>
 
         <button
           className={`conversation-button conversation-button--${phase}`}
@@ -640,22 +769,10 @@ export default function VoiceDemo() {
               </svg>
             )}
           </span>
-          <span>{buttonLabel}</span>
         </button>
 
-        <p
-          className={`call-status call-status--${phase}`}
-          role="status"
-          aria-live="polite"
-        >
+        <p className="visually-hidden" role="status" aria-live="polite">
           {statusText}
-        </p>
-        <p className="language-note">
-          Emirati Arabic <span aria-hidden="true">·</span> English
-          <span className="language-note__divider" aria-hidden="true">
-            ·
-          </span>
-          Language switches automatically
         </p>
       </section>
     </main>
