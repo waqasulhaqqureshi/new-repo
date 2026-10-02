@@ -43,24 +43,24 @@ button {
 
 .demo-content {
   display: flex;
-  width: min(100%, 720px);
+  width: min(100%, 900px);
   flex-direction: column;
   align-items: center;
-  gap: 58px;
+  gap: 34px;
   text-align: center;
 }
 
 .brand-mark {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   color: var(--ink);
   line-height: 1;
 }
 
 .brand-icon {
-  width: 29px;
-  height: 29px;
+  width: 30px;
+  height: 30px;
   color: var(--accent);
 }
 
@@ -70,25 +70,25 @@ button {
   letter-spacing: -0.06em;
 }
 
-.brand-demo {
-  margin-left: 1px;
-  padding: 6px 8px;
-  border-radius: 999px;
-  background: #eaf6f4;
-  color: var(--accent-deep);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.035em;
+.demo-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(76px, 20vw, 176px);
+  font-weight: 750;
+  letter-spacing: -0.095em;
+  line-height: 0.86;
 }
 
 .conversation-button {
-  display: grid;
-  width: 76px;
-  height: 76px;
-  flex: 0 0 76px;
-  place-items: center;
+  display: inline-flex;
+  min-width: 176px;
+  min-height: 60px;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  padding: 0 24px;
   border: 1px solid var(--ink);
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--ink);
   color: #fff;
   cursor: pointer;
@@ -134,19 +134,25 @@ button {
 
 .conversation-button__icon {
   display: grid;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   place-items: center;
 }
 
 .conversation-button__icon svg {
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
+}
+
+.conversation-button__label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
 }
 
 .button-spinner {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   border: 2px solid rgb(255 255 255 / 40%);
   border-top-color: #fff;
   border-radius: 50%;
@@ -173,7 +179,11 @@ button {
 
 @media (max-width: 600px) {
   .demo-content {
-    gap: 50px;
+    gap: 28px;
+  }
+
+  .demo-title {
+    font-size: clamp(68px, 24vw, 132px);
   }
 }
 

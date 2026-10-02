@@ -16,9 +16,10 @@ type SessionToken = {
 
 type TokenResponse = Partial<SessionToken> & { error?: string };
 
-const IDLE_NUDGE_DELAY_MS = 12_000;
+const SILENCE_PROMPT_DELAY_MS = 5_000;
+const SILENCE_HANGUP_DELAY_MS = 5_000;
 const USER_VOICE_RMS_THRESHOLD = 0.018;
-const IDLE_NUDGE_SENTINEL = "__RAQMIVA_SILENCE_CHECK__";
+const SILENCE_CHECK_SENTINEL = "__RAQMIVA_SILENCE_CHECK__";
 
 function hasVoiceActivity(buffer: ArrayBuffer) {
   const samples = new Int16Array(buffer);
@@ -90,79 +91,32 @@ export default function VoiceDemo() {
   const setupCompleteRef = useRef(false);
   const greetingSentRef = useRef(false);
   const startGreetingRef = useRef<(() => void) | null>(null);
-  const idleNudgeTimerRef = useRef<number | null>(null);
-  const idleNudgeSentRef = useRef(false);
+  const silencePromptTimerRef = useRef<number | null>(null);
+  const silenceCutoffTimerRef = useRef<number | null>(null);
+  const silencePromptSentRef = useRef(false);
+  const awaitingSilencePromptRef = useRef(false);
   const modelTurnCompleteRef = useRef(false);
   const knowledgeRequestInFlightRef = useRef(false);
 
-  const clearIdleNudgeTimer = useCallback(() => {
-    if (idleNudgeTimerRef.current !== null) {
-      window.clearTimeout(idleNudgeTimerRef.current);
-      idleNudgeTimerRef.current = null;
+  const clearSilenceTimers = useCallback(() => {
+    if (silencePromptTimerRef.current !== null) {
+      window.clearTimeout(silencePromptTimerRef.current);
+      silencePromptTimerRef.current = null;
+    }
+    if (silenceCutoffTimerRef.current !== null) {
+      window.clearTimeout(silenceCutoffTimerRef.current);
+      silenceCutoffTimerRef.current = null;
     }
   }, []);
 
   const noteCallerSpeech = useCallback(() => {
     if (!callActiveRef.current) return;
 
-    idleNudgeSentRef.current = false;
+    silencePromptSentRef.current = false;
+    awaitingSilencePromptRef.current = false;
     modelTurnCompleteRef.current = false;
-    clearIdleNudgeTimer();
-  }, [clearIdleNudgeTimer]);
-
-  const scheduleIdleNudge = useCallback(() => {
-    clearIdleNudgeTimer();
-    if (!callActiveRef.current || !sessionRef.current || idleNudgeSentRef.current) {
-      return;
-    }
-
-    const checkSilence = () => {
-      idleNudgeTimerRef.current = null;
-      if (
-        !callActiveRef.current ||
-        !sessionRef.current ||
-        idleNudgeSentRef.current
-      ) {
-        return;
-      }
-
-      if (
-        playbackSourcesRef.current.size > 0 ||
-        knowledgeRequestInFlightRef.current ||
-        !modelTurnCompleteRef.current
-      ) {
-        idleNudgeTimerRef.current = window.setTimeout(checkSilence, 1_000);
-        return;
-      }
-
-      const session = sessionRef.current;
-      if (!session) return;
-
-      idleNudgeSentRef.current = true;
-      modelTurnCompleteRef.current = false;
-      setActivity("thinking");
-      try {
-        session.sendClientContent({
-          turns: [
-            {
-              role: "user",
-              parts: [{ text: IDLE_NUDGE_SENTINEL }],
-            },
-          ],
-          turnComplete: true,
-        });
-      } catch {
-        idleNudgeSentRef.current = false;
-        modelTurnCompleteRef.current = true;
-        setActivity("listening");
-      }
-    };
-
-    idleNudgeTimerRef.current = window.setTimeout(
-      checkSilence,
-      IDLE_NUDGE_DELAY_MS,
-    );
-  }, [clearIdleNudgeTimer]);
+    clearSilenceTimers();
+  }, [clearSilenceTimers]);
 
   const prepareSessionToken = useCallback((): Promise<SessionToken> => {
     const cached = tokenRef.current;
@@ -227,8 +181,9 @@ export default function VoiceDemo() {
   const cleanupResources = useCallback(() => {
     callActiveRef.current = false;
     startGreetingRef.current = null;
-    clearIdleNudgeTimer();
-    idleNudgeSentRef.current = false;
+    clearSilenceTimers();
+    silencePromptSentRef.current = false;
+    awaitingSilencePromptRef.current = false;
     modelTurnCompleteRef.current = false;
     knowledgeRequestInFlightRef.current = false;
 
@@ -270,15 +225,118 @@ export default function VoiceDemo() {
     if (context && context.state !== "closed") {
       void context.close().catch(() => undefined);
     }
-  }, [clearIdleNudgeTimer, clearPlayback]);
+  }, [clearPlayback, clearSilenceTimers]);
 
-  const finishConversation = useCallback(() => {
-    stopRequestedRef.current = true;
-    cleanupResources();
-    setPhase("ready");
-    setActivity("listening");
-    setNotice("Conversation ended. Start again whenever you're ready.");
-  }, [cleanupResources]);
+  const finishConversation = useCallback(
+    (endingNotice = "Conversation ended. Start again whenever you're ready.") => {
+      stopRequestedRef.current = true;
+      cleanupResources();
+      setPhase("ready");
+      setActivity("listening");
+      setNotice(endingNotice);
+    },
+    [cleanupResources],
+  );
+
+  const scheduleSilenceHangup = useCallback(() => {
+    if (!callActiveRef.current || !awaitingSilencePromptRef.current) return;
+
+    if (silenceCutoffTimerRef.current !== null) {
+      window.clearTimeout(silenceCutoffTimerRef.current);
+    }
+
+    const checkSilenceAfterPrompt = () => {
+      silenceCutoffTimerRef.current = null;
+      if (!callActiveRef.current || !awaitingSilencePromptRef.current) return;
+
+      if (
+        playbackSourcesRef.current.size > 0 ||
+        knowledgeRequestInFlightRef.current ||
+        !modelTurnCompleteRef.current
+      ) {
+        silenceCutoffTimerRef.current = window.setTimeout(
+          checkSilenceAfterPrompt,
+          250,
+        );
+        return;
+      }
+
+      finishConversation("The call ended after five seconds of silence.");
+    };
+
+    silenceCutoffTimerRef.current = window.setTimeout(
+      checkSilenceAfterPrompt,
+      SILENCE_HANGUP_DELAY_MS,
+    );
+  }, [finishConversation]);
+
+  const scheduleSilencePrompt = useCallback(() => {
+    if (
+      !callActiveRef.current ||
+      !sessionRef.current ||
+      silencePromptSentRef.current ||
+      awaitingSilencePromptRef.current
+    ) {
+      return;
+    }
+
+    if (silencePromptTimerRef.current !== null) {
+      window.clearTimeout(silencePromptTimerRef.current);
+    }
+
+    const checkForCallerSilence = () => {
+      silencePromptTimerRef.current = null;
+      if (
+        !callActiveRef.current ||
+        !sessionRef.current ||
+        silencePromptSentRef.current ||
+        awaitingSilencePromptRef.current
+      ) {
+        return;
+      }
+
+      if (
+        playbackSourcesRef.current.size > 0 ||
+        knowledgeRequestInFlightRef.current ||
+        !modelTurnCompleteRef.current
+      ) {
+        silencePromptTimerRef.current = window.setTimeout(
+          checkForCallerSilence,
+          250,
+        );
+        return;
+      }
+
+      const session = sessionRef.current;
+      if (!session) return;
+
+      silencePromptSentRef.current = true;
+      awaitingSilencePromptRef.current = true;
+      modelTurnCompleteRef.current = false;
+      setActivity("thinking");
+      try {
+        session.sendClientContent({
+          turns: [
+            {
+              role: "user",
+              parts: [{ text: SILENCE_CHECK_SENTINEL }],
+            },
+          ],
+          turnComplete: true,
+        });
+      } catch {
+        silencePromptSentRef.current = false;
+        awaitingSilencePromptRef.current = false;
+        modelTurnCompleteRef.current = true;
+        setActivity("listening");
+      }
+    };
+
+    silencePromptTimerRef.current = window.setTimeout(
+      checkForCallerSilence,
+      SILENCE_PROMPT_DELAY_MS,
+    );
+  }, []);
 
   const playAudioChunk = useCallback((base64Audio: string, mimeType?: string) => {
     const context = audioContextRef.current;
@@ -316,7 +374,13 @@ export default function VoiceDemo() {
         source.disconnect();
         if (playbackSourcesRef.current.size === 0 && callActiveRef.current) {
           setActivity("listening");
-          if (modelTurnCompleteRef.current) scheduleIdleNudge();
+          if (modelTurnCompleteRef.current) {
+            if (awaitingSilencePromptRef.current) {
+              scheduleSilenceHangup();
+            } else {
+              scheduleSilencePrompt();
+            }
+          }
         }
       };
       source.start(startAt);
@@ -324,13 +388,13 @@ export default function VoiceDemo() {
     } catch {
       setNotice("Audio playback was interrupted. You can keep speaking or restart the demo.");
     }
-  }, [scheduleIdleNudge]);
+  }, [scheduleSilenceHangup, scheduleSilencePrompt]);
 
   const answerKnowledgeCalls = useCallback(async (calls: FunctionCall[]) => {
     const session = sessionRef.current;
     if (!session || !callActiveRef.current) return;
 
-    clearIdleNudgeTimer();
+    clearSilenceTimers();
     knowledgeRequestInFlightRef.current = true;
     modelTurnCompleteRef.current = false;
     setActivity("thinking");
@@ -392,9 +456,13 @@ export default function VoiceDemo() {
     } catch {
       modelTurnCompleteRef.current = true;
       setActivity("listening");
-      scheduleIdleNudge();
+      if (awaitingSilencePromptRef.current) {
+        scheduleSilenceHangup();
+      } else {
+        scheduleSilencePrompt();
+      }
     }
-  }, [clearIdleNudgeTimer, scheduleIdleNudge]);
+  }, [clearSilenceTimers, scheduleSilenceHangup, scheduleSilencePrompt]);
 
   const handleLiveMessage = useCallback(
     (message: LiveServerMessage) => {
@@ -405,15 +473,14 @@ export default function VoiceDemo() {
 
       const content = message.serverContent;
       if (content?.interrupted) {
-        clearIdleNudgeTimer();
-        modelTurnCompleteRef.current = false;
+        noteCallerSpeech();
         clearPlayback();
         setActivity("listening");
       }
 
       const parts = content?.modelTurn?.parts ?? [];
       if (parts.length > 0) {
-        clearIdleNudgeTimer();
+        clearSilenceTimers();
         modelTurnCompleteRef.current = false;
       }
       for (const part of parts) {
@@ -433,8 +500,12 @@ export default function VoiceDemo() {
           !knowledgeRequestInFlightRef.current
         ) {
           setActivity("listening");
+          if (awaitingSilencePromptRef.current) {
+            scheduleSilenceHangup();
+          } else {
+            scheduleSilencePrompt();
+          }
         }
-        scheduleIdleNudge();
       }
 
       const functionCalls = message.toolCall?.functionCalls;
@@ -444,10 +515,12 @@ export default function VoiceDemo() {
     },
     [
       answerKnowledgeCalls,
-      clearIdleNudgeTimer,
       clearPlayback,
+      clearSilenceTimers,
+      noteCallerSpeech,
       playAudioChunk,
-      scheduleIdleNudge,
+      scheduleSilenceHangup,
+      scheduleSilencePrompt,
     ],
   );
 
@@ -475,8 +548,9 @@ export default function VoiceDemo() {
     stopRequestedRef.current = false;
     setupCompleteRef.current = false;
     greetingSentRef.current = false;
-    clearIdleNudgeTimer();
-    idleNudgeSentRef.current = false;
+    clearSilenceTimers();
+    silencePromptSentRef.current = false;
+    awaitingSilencePromptRef.current = false;
     modelTurnCompleteRef.current = false;
     knowledgeRequestInFlightRef.current = false;
     callActiveRef.current = true;
@@ -638,7 +712,7 @@ export default function VoiceDemo() {
     }
   }, [
     cleanupResources,
-    clearIdleNudgeTimer,
+    clearSilenceTimers,
     finishConversation,
     handleLiveMessage,
     noteCallerSpeech,
@@ -693,6 +767,8 @@ export default function VoiceDemo() {
         : phase === "error"
           ? "Try again"
           : "Start conversation";
+  const buttonText =
+    phase === "active" ? "END" : phase === "connecting" ? "CONNECTING" : "START";
 
   const statusText =
     phase === "connecting"
@@ -707,8 +783,8 @@ export default function VoiceDemo() {
 
   return (
     <main className="demo-shell">
-      <section className="demo-content" aria-label="Raqmiva voice demo">
-        <div className="brand-mark" role="img" aria-label="Raqmiva demo">
+      <section className="demo-content" aria-label="Raqmiva demo">
+        <div className="brand-mark" role="img" aria-label="Raqmiva logo">
           <svg
             className="brand-icon"
             viewBox="0 0 32 32"
@@ -731,8 +807,9 @@ export default function VoiceDemo() {
             <circle cx="16" cy="26" r="2" fill="currentColor" />
           </svg>
           <span className="brand-name">raqmiva</span>
-          <span className="brand-demo">demo</span>
         </div>
+
+        <h1 className="demo-title">DEMO</h1>
 
         <button
           className={`conversation-button conversation-button--${phase}`}
@@ -769,6 +846,7 @@ export default function VoiceDemo() {
               </svg>
             )}
           </span>
+          <span className="conversation-button__label">{buttonText}</span>
         </button>
 
         <p className="visually-hidden" role="status" aria-live="polite">
